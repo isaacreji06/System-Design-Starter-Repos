@@ -206,31 +206,32 @@ git commit -m "fix: repair helpdesk schema to match ERD"
 
 2. Update `README.md` (this file) with exactly **3 ERD-to-schema decisions** and **1 rejected table shape** using this format:
 
-```markdown
 ## ERD-to-Schema Decisions
 
-### Decision 1: [Column type decision]
-ERD said: ...
-Schema decided: ...
-Reason: ...
+### Decision 1: [Column type decision - UUID Primary and Foreign Keys]
+ERD said: Entity primary keys (`id`) are specified as `uuid`, and foreign key relations (`org_id`, `created_by`, `assignee_id`, `ticket_id`, `author_id`, `tag_id`, `added_by`) link entities by their UUID identifiers.
+Schema decided: Used `UUID PRIMARY KEY DEFAULT gen_random_uuid()` for all primary keys and `UUID` for all foreign key columns, replacing the initial draft's `SERIAL` and `INTEGER`.
+Reason: Sequential integer keys (`SERIAL`) leak business volume metrics (such as total customer count or ticket volume) and expose APIs to ID enumeration attacks. In a multi-tenant SaaS application, UUIDv4 (`gen_random_uuid()`) provides globally unique identifiers that can be safely generated across distributed services without coordination bottlenecks.
 
-### Decision 2: [ON DELETE decision]
-ERD said: ...
-Schema decided: ...
-Reason: ...
+### Decision 2: [ON DELETE decision - SET NULL on Ticket Assignee]
+ERD said: Agent `o|--o{ Ticket : "assigned to"`, indicating an optional relationship where tickets can be unassigned (`uuid assignee_id FK "nullable"`).
+Schema decided: Specified `assignee_id UUID REFERENCES agents(id) ON DELETE SET NULL`.
+Reason: When a support agent account is deleted or offboarded, existing tickets assigned to them must not be deleted (`CASCADE`), which would cause catastrophic data loss, nor should agent deletion be blocked (`RESTRICT`). Setting `assignee_id` to `NULL` preserves the ticket and its entire history while returning it to an unassigned state for other agents or supervisors to triage.
 
-### Decision 3: [Default value decision]
-ERD said: ...
-Schema decided: ...
-Reason: ...
+### Decision 3: [Default value decision - Status and Creation Timestamps]
+ERD said: Ticket `status` contains values `"open|pending|resolved|closed"`, and entity timestamps track creation time (`created_at`, `added_at`).
+Schema decided: Configured `status TEXT NOT NULL CHECK (status IN ('open', 'pending', 'resolved', 'closed')) DEFAULT 'open'`, and applied `TIMESTAMPTZ NOT NULL DEFAULT NOW()` across all `created_at` and `added_at` columns.
+Reason: New tickets submitted by users must enter the queue in an actionable `'open'` status by default without forcing client code to provide it. Defaulting timestamps to `NOW()` with `TIMESTAMPTZ` enforces consistent, tamper-proof UTC audit timestamps on the server side regardless of client time zones.
 
 ## Rejected Table Shape
 
-### Shape: [name what you removed or rejected]
-What it was: ...
-Why rejected: ...
-What would break: ...
-```
+### Shape: Tags stored as array on tickets (`tags TEXT[]`)
+What it was: An array column on the `tickets` table (`ALTER TABLE tickets ADD COLUMN tags TEXT[]`) storing tag names directly on ticket rows as a list of strings.
+Why rejected: The ER diagram defines a proper normalized many-to-many relationship using a dedicated `Tag` entity scoped to an Organization (`Organization ||--o{ Tag`) and a join entity `TicketTag` (`Ticket ||--o{ TicketTag`, `Tag ||--o{ TicketTag`, `Agent ||--o{ TicketTag`). An array column violates First Normal Form (1NF), causes denormalized string duplication, and cannot store join-specific metadata.
+What would break:
+1. Organization scoping and metadata: Organizations cannot manage a standardized tag catalog with custom UI colors (`color_hex`).
+2. Audit trail: There is no way to record which agent added the tag (`added_by`) or the timestamp when the tag was applied (`added_at`).
+3. Relational integrity and query performance: Filtering or aggregating tickets by tag requires unnesting arrays or full table scans, and renaming or deleting a tag would require mutating every ticket row containing that string instead of updating a single row in `tags`.
 
 3. Push and open a PR:
 ```bash
